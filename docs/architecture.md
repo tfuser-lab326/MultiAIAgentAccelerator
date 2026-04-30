@@ -55,7 +55,7 @@ prior-auth-maf/
 │
 ├── agents/                # Four independent MAF Hosted Agent deployable units
 │   ├── clinical/          # ICD-10, PubMed, Clinical Trials MCP — port 8001
-│   │   ├── main.py        # from_agent_framework entry point + structured output via default_options
+│   │   ├── main.py        # ResponsesHostServer entry point + structured output via default_options
 │   │   ├── schemas.py     # Pydantic output model (ClinicalResult)
 │   │   ├── Dockerfile
 │   │   ├── agent.yaml     # Foundry Hosted Agent descriptor
@@ -81,8 +81,8 @@ prior-auth-maf/
 │
 ├── frontend/              # Next.js UI
 ├── scripts/               # Post-provision helpers
-│   ├── register_agents.py # Registers all 4 agents with Foundry Hosted Agents
-│   └── check_agents.py   # Pre-flight health check — agents, App Insights, MCP, backend, frontend
+│   ├── grant_agent_rbac.py # postdeploy hook — grants Azure AI User on the Foundry account scope to each per-agent instance identity
+│   └── check_agents.py    # Pre-flight health check — agents, App Insights, backend, frontend
 ├── docs/                  # Architecture, deployment guide, API reference
 ├── infra/                 # Bicep / azd infrastructure
 └── docker-compose.yml     # Local: backend + 4 agents + frontend
@@ -103,10 +103,10 @@ prior-auth-maf/
 3. The **Orchestrator** runs a pre-flight check and then dispatches the
     four specialist agents. `hosted_agents.py` uses a **two-mode dispatcher**:
     - **Docker Compose (local dev):** direct `POST {HOSTED_AGENT_*_URL}/responses` to each agent container over the Docker bridge network.
-    - **Foundry Hosted Agents (production):** Uses `AIProjectClient.get_openai_client()` → `responses.create()` with `extra_body` containing both `agent_reference` for routing and a structured `input` message array matching the `from_agent_framework()` envelope format; authentication via `DefaultAzureCredential` (managed identity); the Foundry Agent Service routes to the correct registered agent.
+    - **Foundry Hosted Agents (production):** Uses `AIProjectClient(allow_preview=True).get_openai_client(agent_name=...)` to obtain a per-agent OpenAI client bound to the agent's dedicated endpoint (`{project_endpoint}/agents/{name}/endpoint/protocols/openai/v1/responses`), then calls `responses.create(input=[messages])` directly — no `extra_body` and no `agent_reference` are needed in the refreshed preview. Authentication via `DefaultAzureCredential` (managed identity).
 
-    Each agent container runs MAF
-    `from_agent_framework(agent).run()` with `default_options={"response_format": PydanticModel}`
+    Each agent container runs `ResponsesHostServer(agent).run()` with
+    `default_options={"response_format": PydanticModel, "store": False}`
     for token-level structured output. Results are parsed from `response.output_text`
     as JSON.
 
@@ -142,59 +142,58 @@ prior-auth-maf/
 
 ## MCP Integration
 
-All MCP tool calls are made **directly from the agent container** via `MCPStreamableHTTPTool`.
-Each agent's `main.py` creates tool instances with a shared `httpx.AsyncClient` (including
-the `User-Agent: claude-code/1.0` header required by DeepSense CloudFront). Tools are
-passed via `tools=[...]` to `.as_agent()` and called directly during inference.
+All five MCP servers are wired **in-container** via `MCPStreamableHTTPTool`
+(Microsoft Agent Framework) inside each agent's `main.py`. The refreshed
+Foundry preview's `MCPTool` model is currently rejected by the agent-server
+runtime, so the in-container path is used uniformly for all servers — this
+keeps a single, debuggable code path and avoids the `invalid_payload` errors
+seen with platform-managed MCPs.
 
-> **Note:** `scripts/register_agents.py` also creates Foundry project connections for
-> portal visibility (**Build → Tools**), but agents are registered with `tools=[]` —
-> `MCPTool` definitions on `HostedAgentDefinition` are disabled because the Foundry
-> `tools/resolve` API is not yet available in all regions. MCP tools are handled
-> entirely by in-container `MCPStreamableHTTPTool`.
+| MCP Server | Used by | Wiring | Notes |
+|---|---|---|---|
+| ICD-10 codes | Clinical | In-container `MCPStreamableHTTPTool` | DeepSense; `User-Agent: claude-code/1.0` header required |
+| Clinical Trials | Clinical | In-container `MCPStreamableHTTPTool` | DeepSense |
+| NPI Registry | Coverage | In-container `MCPStreamableHTTPTool` | DeepSense |
+| CMS Coverage | Coverage | In-container `MCPStreamableHTTPTool` | DeepSense |
+| PubMed | Clinical | In-container `_ReconnectingMCPTool` | Subclass that catches `McpError('Session terminated')` and reconnects (~10 min idle expiry) |
 
-### PubMed Session Reconnect
-
-PubMed's MCP server (`pubmed.mcp.claude.com`) terminates idle sessions after
-~10 minutes. The clinical agent uses `_ReconnectingMCPTool` — a subclass of
-`MCPStreamableHTTPTool` that catches `McpError('Session terminated')` and
-automatically reconnects with a fresh session. Other MCP servers (DeepSense)
-do not have aggressive session TTLs and use standard `MCPStreamableHTTPTool`.
+MCP endpoints are passed to each container as `MCP_*` env vars set in
+`agents/<name>/agent.yaml` (Foundry deploy) and in `docker-compose.yml`
+(local dev). The same code paths run in both modes.
 
 ### How MCP Tools Are Provisioned
 
-During `azd up`, the `scripts/register_agents.py` script:
+During `azd up`, the `azd ai agent` extension builds each agent image, pushes
+it to ACR, and calls `client.agents.create_version()` on the Foundry project.
+The `agent.yaml` `env_vars` block is propagated to the container at runtime —
+including the `MCP_*` URLs that each `main.py` reads when constructing
+`MCPStreamableHTTPTool` instances:
 
-1. **Creates project connections** via the ARM REST API (idempotent PUT) for each MCP server (portal visibility)
-2. **Registers agents** with `tools=[]` and `MCP_*` environment variables
-3. **Agent containers** use `MCPStreamableHTTPTool` to call MCP servers directly via the `MCP_*` URLs
+```yaml
+# agents/clinical/agent.yaml (excerpt)
+env_vars:
+  MCP_ICD10: https://mcp.deepsense.ai/icd10_codes/mcp
+  MCP_PUBMED: https://pubmed.mcp.claude.com/mcp
+  MCP_CLINICAL_TRIALS: https://mcp.deepsense.ai/clinical_trials/mcp
+```
 
 ```python
-# scripts/register_agents.py (simplified)
-
-from azure.ai.projects.models import HostedAgentDefinition
-
-# Agents are registered with tools=[] — MCP tool calls are handled
-# directly by MCPStreamableHTTPTool in each agent's main.py.
-agent = client.agents.create_version(
-    agent_name="clinical-reviewer-agent",
-    definition=HostedAgentDefinition(
-        ...,
-        environment_variables={
-            "MCP_ICD10_CODES": "https://mcp.deepsense.ai/icd10_codes/mcp",
-            "MCP_PUBMED": "https://pubmed.mcp.claude.com/mcp",
-            "MCP_CLINICAL_TRIALS": "https://mcp.deepsense.ai/clinical_trials/mcp",
-        },
-        tools=[],  # MCPTool defs disabled (tools/resolve API not GA in all regions)
-    ),
-)
+# agents/clinical/main.py (simplified)
+tools = [
+    MCPStreamableHTTPTool(name="icd10-codes", url=os.environ["MCP_ICD10"],
+                          headers={"User-Agent": "claude-code/1.0"}),
+    _ReconnectingMCPTool(name="pubmed", url=os.environ["MCP_PUBMED"]),
+    MCPStreamableHTTPTool(name="clinical-trials", url=os.environ["MCP_CLINICAL_TRIALS"],
+                          headers={"User-Agent": "claude-code/1.0"}),
+]
+agent = Agent(name="clinical-reviewer-agent", tools=tools, ...)
 ```
 
 ### Authentication
 
 | MCP Server | Provider | Auth Type | Header |
 |-----------|----------|-----------|--------|
-| ICD-10, ClinicalTrials, NPI, CMS | DeepSense | Key-based | `User-Agent: claude-code/1.0` |
+| ICD-10, ClinicalTrials, NPI, CMS | DeepSense | Key-based | `User-Agent: claude-code/1.0` (passed via `MCPStreamableHTTPTool` `headers=`) |
 | PubMed | Anthropic | Unauthenticated | None |
 
 Authentication headers are stored in Foundry project connections (Key-based auth)
@@ -391,15 +390,21 @@ This project consumes **remote MCP servers** from the
 ### How MCP Is Integrated
 
 ```
-agents/<name>/main.py     — MCPStreamableHTTPTool instances (direct HTTP to MCP servers)
-    ↓ passed via
-.as_agent(tools=[...])    — MAF wires tools into the agent for inference
-    ↓ hosted by
-from_agent_framework(agent).run()   — Exposes POST /responses endpoint
+agents/<name>/agent.yaml   — Declares MCP_* env vars. The azd ai agent
+                             extension propagates these into the running
+                             container at create_version() time.
 
-scripts/register_agents.py — Creates Foundry project connections (portal visibility)
-                             Registers agents with tools=[] and MCP_* env vars
+agents/<name>/main.py      — Reads MCP_* env vars and wires each server as
+                             an MCPStreamableHTTPTool (or our
+                             _ReconnectingMCPTool subclass for PubMed) into
+                             Agent(tools=[...]).
+    ↓ hosted by
+ResponsesHostServer(agent).run()    — Exposes the dedicated agent endpoint
 ```
+
+> The same Python code paths run in both Foundry and `docker-compose` modes —
+> only the source of the `MCP_*` env vars differs (`agent.yaml` vs.
+> `docker-compose.yml`).
 
 ---
 
@@ -443,7 +448,7 @@ prior-auth-maf/
 │       │   ├── synthesis_agent.py        # HTTP dispatcher → Synthesis hosted agent
 │       │   └── orchestrator.py           # Multi-agent coordinator + audit trail
 │       ├── services/
-│       │   ├── hosted_agents.py          # Two-mode dispatcher: direct HTTP (docker-compose) or Foundry agent_reference routing (production)
+│       │   ├── hosted_agents.py          # Two-mode dispatcher: direct HTTP (docker-compose) or per-agent Foundry endpoint via get_openai_client(agent_name=...)
 │       │   ├── audit_pdf.py              # Audit justification PDF (fpdf2)
 │       │   ├── cpt_validation.py         # CPT/HCPCS format validation (pre-flight)
 │       │   └── notification.py           # Notification letters + PDF
@@ -456,7 +461,7 @@ prior-auth-maf/
 │
 ├── agents/
 │   ├── clinical/
-│   │   ├── main.py                       # AzureOpenAIResponsesClient + from_agent_framework
+│   │   ├── main.py                       # FoundryChatClient + Agent + ResponsesHostServer
 │   │   ├── schemas.py                    # Pydantic output model (ClinicalResult)
 │   │   ├── requirements.txt              # azure-ai-agentserver, httpx, pydantic
 │   │   ├── Dockerfile
@@ -471,7 +476,8 @@ prior-auth-maf/
 │   └── app/, components/, lib/
 │
 ├── scripts/
-│   └── register_agents.py               # Post-provision: register agents with Foundry Hosted Agents service
+│   ├── grant_agent_rbac.py              # Postdeploy: grants Azure AI User on Foundry account scope to each per-agent instance identity
+│   └── check_agents.py                  # Pre-flight health check — agents, App Insights, backend, frontend
 ├── docs/                                 # Supporting documentation
 ├── infra/                                # Azure Bicep IaC modules
 ├── azure.yaml                            # Azure Developer CLI project

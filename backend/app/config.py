@@ -17,8 +17,9 @@ class Settings:
 
     # ── Foundry Hosted Agents mode ──────────────────────────────────────────────
     # On Azure (azd up), Bicep injects AZURE_AI_PROJECT_ENDPOINT and the 4 agent
-    # name vars automatically. The backend calls agents via the Foundry Responses
-    # API with agent_reference routing; no direct agent URLs are used.
+    # name vars automatically. The backend obtains a per-agent OpenAI client via
+    # AIProjectClient.get_openai_client(agent_name=...) which is bound to the
+    # agent's dedicated endpoint — no direct URLs and no agent_reference body.
     AZURE_AI_PROJECT_ENDPOINT: str = os.getenv("AZURE_AI_PROJECT_ENDPOINT", "")
     HOSTED_AGENT_CLINICAL_NAME: str = os.getenv(
         "HOSTED_AGENT_CLINICAL_NAME", "clinical-reviewer-agent"

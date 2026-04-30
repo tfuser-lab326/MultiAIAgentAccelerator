@@ -42,8 +42,8 @@ and automatically reconnects with a fresh session. See `agents/clinical/main.py`
 
 If you still see this error, check:
 1. The container image was rebuilt after the fix (`azd up`)
-2. The agent version includes the `_ReconnectingMCPTool` change (check image tag in
-   `az cognitiveservices agent show`)
+2. The agent revision includes the `_ReconnectingMCPTool` change (check the
+   image tag via `az rest --method GET --url "${BASE_URL}/agents/clinical-reviewer-agent?api-version=v1" --resource "https://ai.azure.com"`)
 
 ---
 
@@ -52,15 +52,18 @@ If you still see this error, check:
 All agent calls fail with `400 - ID cannot be null or empty` or return
 `status: "failed"` with empty output.
 
-**Cause:** `MCPTool` definitions in `HostedAgentDefinition.tools` cause the
-`agentserver-core` adapter to inject a `UserInfoContextMiddleware` that calls
-`/agents/{name}/tools/resolve`. This API is not available in all Foundry regions
-(returns 404), which crashes the entire ASGI pipeline.
+**Cause (initial preview, now resolved):** In the initial Hosted Agents preview,
+`MCPTool` entries in `HostedAgentDefinition.tools` triggered a
+`UserInfoContextMiddleware` that called `/agents/{name}/tools/resolve`, which
+failed in regions where the API was unavailable.
 
-**Fix:** Ensure agents are registered with `tools=[]` in `scripts/register_agents.py`.
-MCP tools are handled directly by `MCPStreamableHTTPTool` in each agent's `main.py`,
-not via Foundry's `MCPTool` proxy. See the comments in `scripts/register_agents.py`
-for details.
+**Fix (current):** This accelerator wires all five MCP servers **in-container**
+via `MCPStreamableHTTPTool` (read from `MCP_*` env vars in each
+`agents/<name>/agent.yaml`), so the platform `tools/resolve` flow is no longer
+on the hot path. If you still hit this error, confirm you are on the new
+package set (`agent-framework-foundry-hosting>=1.0.0a260424`,
+`azure-ai-agentserver-core>=2.0.0b3`, `azure-ai-projects>=2.1.0`) and that
+`azd deploy` ran cleanly to redeploy the agent images.
 
 ---
 
@@ -78,12 +81,14 @@ Agents connect but return `{"error": "...", "tool_results": []}` instead of stru
 
 1. Verify agents are registered:
    ```bash
-   python scripts/register_agents.py --list
+   azd ai agent list
+   # or run the pre-flight health check:
+   python scripts/check_agents.py
    ```
 
 2. Confirm the endpoint format in `AZURE_AI_PROJECT_ENDPOINT` includes `/api/projects/<project>`.
 
-3. In the Foundry portal under **Build** → **Deployments**, confirm the gpt-5.4 deployment exists and its name matches `AZURE_OPENAI_DEPLOYMENT_NAME` in each `agent.yaml`.
+3. In the Foundry portal under **Build** → **Deployments**, confirm the gpt-5.4 deployment exists and its name matches `AZURE_OPENAI_DEPLOYMENT_NAME` declared in each `agents/<name>/agent.yaml`.
 
 ---
 
@@ -143,8 +148,9 @@ Make sure `docker-compose.yml` is running all four agent containers and that the
 If set manually, confirm the project endpoint format:
 `https://<account>.services.ai.azure.com/api/projects/<project-name>`
 
-Also confirm the agents were successfully registered by `scripts/register_agents.py`
-in the postprovision hook (check `azd provision` output for registration errors).
+Also confirm the agents were successfully deployed by `azd deploy` (which
+invokes the `azd ai agent` extension's `create_version()` flow) — check the
+`azd deploy` output for registration errors, or run `azd ai agent list`.
 
 You can verify all deployment health at any time with:
 
@@ -172,25 +178,53 @@ agent deployment.
 
 - The backend ACA managed identity is missing the `CognitiveServicesOpenAIUser` role on the Foundry account — check `infra/modules/role-assignments.bicep` and re-run `azd provision`
 - The Foundry project managed identity is missing `Cognitive Services OpenAI Contributor` or `Azure AI User` on the Foundry account — these roles are required for hosted agent containers to call gpt-5.4 and use Agent Service data actions
-- The deployer user is missing the `Azure AI User` role on the Foundry project (required by `scripts/register_agents.py` to register agents) — this role is auto-assigned by `az role assignment create` in the postprovision hook; re-run `azd up` to fix
+- The deployer user is missing the `Azure AI User` role on the Foundry project (required by the `azd ai agent` extension to call `create_version()`) — this role is auto-assigned by `az role assignment create` in the postprovision hook; re-run `azd up` to fix
 - `AZURE_AI_PROJECT_ENDPOINT` is pointing to the wrong project or account
-- The agents were not successfully registered — check `scripts/register_agents.py` output in the postprovision hook logs
+- One or more per-agent instance identities are missing `Azure AI User` on the Foundry account — the postdeploy hook (`scripts/grant_agent_rbac.py`) grants this; re-run `azd hooks run postdeploy` to retry
+- The agents were not successfully deployed — check the `azd deploy` output for `create_version` errors
 
 ---
 
 ## Agent Registration Fails with PermissionDenied on First Run
 
-`register_agents.py` fails with:
+`azd deploy` (or `azd ai agent` directly) fails with:
 ```
 ERROR: (PermissionDenied) The principal ... lacks the required data action
 Microsoft.CognitiveServices/accounts/AIServices/agents/write
 ```
+or
+```
+ERROR: (AuthorizationFailed) ... does not have authorization to perform action
+'Microsoft.CognitiveServices/accounts/AIServices/projects/agents/deployments/write'
+```
 
-**Cause:** Azure RBAC propagation delay. The postprovision hook assigns the Azure AI User role immediately before running `register_agents.py`, but Azure's role cache can take up to several minutes to update.
+**Cause:** Either RBAC propagation delay, or the deployer is missing the
+**Azure AI Project Manager** role. The refreshed Hosted Agents preview
+(Apr 2026) requires Project Manager at the project scope to call
+`create_version()` on `HostedAgentDefinition` / `PromptAgentDefinition` —
+`Azure AI User` only covers invoking an existing agent, not deploying one.
+See the [official permissions reference](https://learn.microsoft.com/azure/foundry/agents/how-to/deploy-hosted-agent#required-permissions).
 
-**Automatic handling:** The hook automatically detects newly assigned roles and retries `register_agents.py` every 10 seconds (up to 12 attempts / ~2 minutes). You'll see "Waiting for RBAC propagation (attempt N/12)..." messages in the output — this is expected on first deployment.
+**Automatic handling:** The postprovision hook assigns both `Azure AI User`
+and `Azure AI Project Manager` to the deployer at the project scope before
+`azd deploy` runs the `azd ai agent` create_version flow, so RBAC is in place
+by the time agents are registered. The postdeploy hook
+(`scripts/grant_agent_rbac.py`) then grants `Azure AI User` to each per-agent
+instance identity on the Foundry account. On first deployment, ~60 seconds of
+RBAC propagation may be needed before the first runtime call succeeds — if you
+see a 403 from a hosted agent immediately after deploy, wait ~60s and retry.
 
-**If all 12 retries fail:** RBAC propagation took unusually long. Simply re-run `azd up` — the role already exists so registration will proceed without retries.
+**If retries fail:** Simply re-run `azd up` (or `azd deploy && azd hooks run
+postdeploy`) — the roles already exist so subsequent runs proceed without
+additional propagation delay. If failures persist, manually verify the
+assignments:
+```bash
+az role assignment list \
+  --assignee "$(az ad signed-in-user show --query id -o tsv)" \
+  --scope "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<foundry>/projects/<project>" \
+  --query "[].roleDefinitionName" -o tsv
+```
+Both `Azure AI User` and `Azure AI Project Manager` should appear.
 
 ---
 
@@ -210,8 +244,8 @@ fails.
 The backend uses `response.output_text` from the OpenAI SDK and parses the JSON result directly.
 
 **Fix:** Confirm the agent container is returning the standard Foundry Responses
-API envelope. MAF's `from_agent_framework(agent).run()` produces this format
-automatically.
+API envelope. The Microsoft Agent Framework `ResponsesHostServer(agent).run()`
+produces this format automatically.
 
 ---
 
@@ -256,29 +290,14 @@ A normal Clinical result has 3 expected top-level keys (`diagnosis_validation`, 
 
 If traces don't appear in Foundry (Trace ID = "--", Duration = "--", Tokens = "--"):
 
-> **Known limitation (current Hosted Agents Preview):** The Foundry Traces tab
-> does not display trace data for hosted agents even when all span attributes
-> are correctly populated in App Insights. The Traces tab reads from a Foundry
-> internal OTEL collector, which does not surface hosted agent spans in the
-> current version. The Monitor tab (which reads from App Insights) works
-> correctly. This is expected to be fixed in the vNext hosted agents backend.
-> The `_patch_trace_agent_id()` monkey-patch in each agent's `main.py` should
-> be removed once vNext is available.
-
 - Verify the Foundry project has Application Insights configured
 - If App Insights was added after agent registration, unregister and re-register
 - Verify your backend sends traces to the **same** Application Insights resource
-- **Verify `gen_ai.agent.id` is populated in spans.** The Foundry portal uses
-  this attribute to correlate traces to registered agents. The agentserver
-  adapter (v1.0.0b17) reads `gen_ai.agent.id` from the request payload's
-  `agent` field via `AgentRunContext.get_agent_id_object()`. However, Foundry
-  Agent Service does not include the `agent` reference when forwarding requests
-  to hosted containers — resulting in empty `gen_ai.agent.id` / `gen_ai.agent.name`
-  in spans and Trace ID = "--" in the Foundry portal.
-  **Fix:** monkey-patch `AgentRunContextMiddleware.set_run_context_to_context_var`
-  to inject the agent name as a fallback. All four agents in this project apply
-  this patch via `_patch_trace_agent_id()` — see any agent's `main.py` for the
-  implementation.
+- **Verify `gen_ai.agent.id` is populated in spans.** The refreshed Hosted
+  Agents preview populates `gen_ai.agent.id` and `gen_ai.agent.name` natively
+  from the platform-injected `FOUNDRY_AGENT_NAME` env var — the previous
+  `_patch_trace_agent_id()` monkey-patch is no longer needed and has been
+  removed from all four agents.
   You can verify by querying App Insights:
   ```kql
   traces
@@ -287,7 +306,8 @@ If traces don't appear in Foundry (Trace ID = "--", Duration = "--", Tokens = "-
   | extend agentId = tostring(parse_json(customDimensions)['gen_ai.agent.id'])
   | project timestamp, agentId
   ```
-  If `agentId` is empty, the patch is not applied.
+  If `agentId` is empty, confirm `FOUNDRY_AGENT_NAME` is set in the agent
+  container env (it is injected automatically by the Foundry runtime).
 - **Check the env var name:** The Foundry agentserver adapter expects
   `APPLICATIONINSIGHTS_CONNECTION_STRING` (no underscore between APPLICATION
   and INSIGHTS). This is different from `APPLICATION_INSIGHTS_CONNECTION_STRING`

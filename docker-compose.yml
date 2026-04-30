@@ -17,6 +17,9 @@ services:
       - HOSTED_AGENT_SYNTHESIS_URL=http://agent-synthesis:8088
       # App settings
       - FRONTEND_ORIGIN=http://localhost:3000
+      # OTel sensitive-data capture (PHI risk — local dev only).
+      # Uncomment in your shell or backend/.env, never commit as `true`.
+      # - ENABLE_OTEL_SENSITIVE_DATA=${ENABLE_OTEL_SENSITIVE_DATA:-false}
     env_file:
       - ./backend/.env
     depends_on:
@@ -51,8 +54,10 @@ services:
       - MCP_PUBMED=${MCP_PUBMED:-https://pubmed.mcp.claude.com/mcp}
       - MCP_CLINICAL_TRIALS=${MCP_CLINICAL_TRIALS:-https://mcp.deepsense.ai/clinical_trials/mcp}
       - APPLICATION_INSIGHTS_CONNECTION_STRING=${APPLICATION_INSIGHTS_CONNECTION_STRING:-}
+      # OTel sensitive-data capture (PHI risk — local dev only). Default: false.
+      - ENABLE_OTEL_SENSITIVE_DATA=${ENABLE_OTEL_SENSITIVE_DATA:-false}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8088/liveness"]
+      test: ["CMD", "curl", "-f", "http://localhost:8088/readiness"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -73,8 +78,10 @@ services:
       - MCP_NPI_REGISTRY=${MCP_NPI_REGISTRY:-https://mcp.deepsense.ai/npi_registry/mcp}
       - MCP_CMS_COVERAGE=${MCP_CMS_COVERAGE:-https://mcp.deepsense.ai/cms_coverage/mcp}
       - APPLICATION_INSIGHTS_CONNECTION_STRING=${APPLICATION_INSIGHTS_CONNECTION_STRING:-}
+      # OTel sensitive-data capture (PHI risk — local dev only). Default: false.
+      - ENABLE_OTEL_SENSITIVE_DATA=${ENABLE_OTEL_SENSITIVE_DATA:-false}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8088/liveness"]
+      test: ["CMD", "curl", "-f", "http://localhost:8088/readiness"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -93,8 +100,10 @@ services:
       - AZURE_AI_PROJECT_ENDPOINT=${AZURE_AI_PROJECT_ENDPOINT}
       - AZURE_OPENAI_DEPLOYMENT_NAME=${AZURE_OPENAI_DEPLOYMENT_NAME:-gpt-4o-mini}
       - APPLICATION_INSIGHTS_CONNECTION_STRING=${APPLICATION_INSIGHTS_CONNECTION_STRING:-}
+      # OTel sensitive-data capture (PHI risk — local dev only). Default: false.
+      - ENABLE_OTEL_SENSITIVE_DATA=${ENABLE_OTEL_SENSITIVE_DATA:-false}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8088/liveness"]
+      test: ["CMD", "curl", "-f", "http://localhost:8088/readiness"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -113,8 +122,10 @@ services:
       - AZURE_AI_PROJECT_ENDPOINT=${AZURE_AI_PROJECT_ENDPOINT}
       - AZURE_OPENAI_DEPLOYMENT_NAME=${AZURE_OPENAI_DEPLOYMENT_NAME:-gpt-4o}
       - APPLICATION_INSIGHTS_CONNECTION_STRING=${APPLICATION_INSIGHTS_CONNECTION_STRING:-}
+      # OTel sensitive-data capture (PHI risk — local dev only). Default: false.
+      - ENABLE_OTEL_SENSITIVE_DATA=${ENABLE_OTEL_SENSITIVE_DATA:-false}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8088/liveness"]
+      test: ["CMD", "curl", "-f", "http://localhost:8088/readiness"]
       interval: 30s
       timeout: 5s
       retries: 3

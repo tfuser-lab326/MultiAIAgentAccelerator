@@ -1,5 +1,6 @@
 # =============================================================================
-# Backend: Python + Claude Agent SDK (CLI bundled in platform wheel)
+# Backend: FastAPI orchestrator that dispatches to 4 Foundry Hosted Agents
+# (or local agent containers in docker-compose mode) over HTTP.
 # =============================================================================
 FROM python:3.12-slim
 

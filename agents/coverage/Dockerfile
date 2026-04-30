@@ -31,6 +31,6 @@ ENV PYTHONUNBUFFERED=1
 EXPOSE 8088
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:8088/liveness || exit 1
+    CMD curl -f http://localhost:8088/readiness || exit 1
 
 CMD ["python", "main.py"]

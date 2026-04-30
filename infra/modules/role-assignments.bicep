@@ -3,16 +3,21 @@
 //
 // 1. Backend ACA identity → Cognitive Services OpenAI User on Foundry account
 //    Allows the FastAPI orchestrator to call the Foundry Responses API with
-//    agent_reference routing to invoke Foundry Hosted Agents.
+//    per-agent dedicated endpoints to invoke Foundry Hosted Agents.
 //
 // 2. Foundry project managed identity → AcrPull on Container Registry
 //    Allows Foundry Agent Service to pull the 4 agent container images from
 //    ACR when provisioning Foundry Hosted Agent deployments.
 //
-// Note: The deployer's Azure AI User role (needed for agent registration)
-// is assigned via `az role assignment create` in the postprovision hook instead
-// of Bicep, because `az role assignment create` is idempotent and avoids
+// Note: The deployer's Azure AI User and Azure AI Project Manager roles
+// (needed to register and deploy hosted agents) are assigned via
+// `az role assignment create` in the postprovision hook instead of Bicep,
+// because `az role assignment create` is idempotent and avoids
 // RoleAssignmentExists conflicts when the role was previously granted manually.
+// Project Manager is required by the refreshed Hosted Agents preview
+// (Apr 2026) for the create_version() data action; Azure AI User alone is
+// not sufficient. See:
+// https://learn.microsoft.com/azure/foundry/agents/how-to/deploy-hosted-agent#required-permissions
 // ---------------------------------------------------------------------------
 
 @description('Name of the existing Foundry (CognitiveServices) account')
@@ -21,11 +26,17 @@ param foundryAccountName string
 @description('Principal ID of the backend Container App system-assigned managed identity')
 param backendPrincipalId string
 
+@description('Principal ID of the frontend Container App system-assigned managed identity')
+param frontendPrincipalId string
+
 @description('Name of the Azure Container Registry (for AcrPull grant to Foundry project)')
 param containerRegistryName string
 
 @description('Principal ID of the Foundry project system-assigned managed identity')
 param foundryProjectPrincipalId string
+
+@description('Principal ID of the Foundry account system-assigned managed identity')
+param foundryAccountPrincipalId string
 
 // Cognitive Services OpenAI User — allows calling Azure OpenAI + Foundry APIs
 var cognitiveServicesOpenAIUserRoleId = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
@@ -89,6 +100,47 @@ resource foundryProjectAIUserRoleAssignment 'Microsoft.Authorization/roleAssignm
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', azureAIUserRoleId)
     principalId: foundryProjectPrincipalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// 5. Backend Container App identity → AcrPull on Container Registry
+//    Allows the backend ACA revision to pull its image from ACR using
+//    system-assigned managed identity (no admin password needed).
+resource backendAcrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(containerRegistry.id, backendPrincipalId, acrPullRoleId)
+  scope: containerRegistry
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
+    principalId: backendPrincipalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// 6. Frontend Container App identity → AcrPull on Container Registry
+//    Same as #5 but for the frontend (Next.js / nginx) container app.
+resource frontendAcrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(containerRegistry.id, frontendPrincipalId, acrPullRoleId)
+  scope: containerRegistry
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
+    principalId: frontendPrincipalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// 7. Foundry ACCOUNT identity → AcrPull on Container Registry
+//    The hosted agents service uses the account MI (not the project MI) to
+//    validate / pull agent images at `create_version()` time. Without this
+//    grant, the API returns `(server_error) 500` with no detail. Discovered
+//    empirically; the project-MI AcrPull grant in #2 is necessary but not
+//    sufficient.
+resource foundryAccountAcrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(containerRegistry.id, foundryAccountPrincipalId, acrPullRoleId)
+  scope: containerRegistry
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
+    principalId: foundryAccountPrincipalId
     principalType: 'ServicePrincipal'
   }
 }

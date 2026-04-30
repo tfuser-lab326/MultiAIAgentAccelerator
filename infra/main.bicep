@@ -2,7 +2,7 @@
 // Prior Auth MAF — Main Bicep template
 // Deploys: Resource Group, Microsoft Foundry (Resource + Project), Container Registry,
 //          Container Apps Environment, Backend + 4 Agent + Frontend Container Apps,
-//          Log Analytics, App Insights, Role Assignments (Cognitive Services OpenAI User, Azure AI User)
+//          Log Analytics, App Insights, Role Assignments (Cognitive Services OpenAI User, Azure AI User; deployer also receives Azure AI Project Manager via postprovision hook)
 // ---------------------------------------------------------------------------
 
 targetScope = 'subscription'
@@ -32,22 +32,9 @@ param deploymentSkuName string = 'GlobalStandard'
 @description('Whether container images have been built to ACR (set automatically by postprovision hook)')
 param imagesBuilt string = ''
 
-// ── MCP Server URL parameters (all have production defaults) ────────────────
-
-@description('ICD-10 diagnosis code validation MCP server URL')
-param mcpIcd10CodesUrl string = 'https://mcp.deepsense.ai/icd10_codes/mcp'
-
-@description('PubMed biomedical literature search MCP server URL')
-param mcpPubmedUrl string = 'https://pubmed.mcp.claude.com/mcp'
-
-@description('ClinicalTrials.gov search MCP server URL')
-param mcpClinicalTrialsUrl string = 'https://mcp.deepsense.ai/clinical_trials/mcp'
-
-@description('NPI Registry provider verification MCP server URL')
-param mcpNpiRegistryUrl string = 'https://mcp.deepsense.ai/npi_registry/mcp'
-
-@description('CMS Coverage Medicare LCD/NCD policy lookup MCP server URL')
-param mcpCmsCoverageUrl string = 'https://mcp.deepsense.ai/cms_coverage/mcp'
+// MCP server URLs (ICD-10, PubMed, ClinicalTrials.gov, NPI Registry, CMS Coverage)
+// are configured in the agent code (`agents/<name>/main.py`) and can be overridden at
+// runtime via container-app environment variables (`MCP_*_URL`) without redeployment.
 
 // ── Variables ───────────────────────────────────────────────────────────────
 
@@ -130,18 +117,23 @@ module backend './modules/container-app.bicep' = {
     location: location
     tags: union(tags, { 'azd-service-name': 'backend' })
     containerAppsEnvironmentId: containerAppsEnv.outputs.environmentId
-    containerRegistryName: containerRegistry.outputs.name
     containerRegistryLoginServer: containerRegistry.outputs.loginServer
     imageName: 'backend'
     targetPort: 8000
     useAcrImage: imagesBuilt == 'true'
     cpu: '1'
     memory: '2Gi'
+    // Backend keeps in-memory state (`_review_store` in orchestrator, monotonic letter
+    // counter in `services/notification.py`). Pinned to a single replica to preserve
+    // correctness. For multi-replica scale-out, externalize this state into Cosmos DB
+    // / Redis (see `docs/production-migration.md`).
     minReplicas: 1
+    maxReplicas: 1
     env: [
       // Foundry project endpoint — backend calls Foundry Hosted Agents via the Responses API
       { name: 'AZURE_AI_PROJECT_ENDPOINT', value: aiFoundry.outputs.projectEndpoint }
-      // Foundry Hosted Agent names (as registered by scripts/register_agents.py post-deploy)
+      // Foundry Hosted Agent names (as registered by `azd deploy` via the
+      // `services:` block in azure.yaml; must match `name:` in each agent.yaml)
       { name: 'HOSTED_AGENT_CLINICAL_NAME', value: 'clinical-reviewer-agent' }
       { name: 'HOSTED_AGENT_COVERAGE_NAME', value: 'coverage-assessment-agent' }
       { name: 'HOSTED_AGENT_COMPLIANCE_NAME', value: 'compliance-agent' }
@@ -155,9 +147,11 @@ module backend './modules/container-app.bicep' = {
   }
 }
 // ── Role Assignments ─────────────────────────────────────────────────────────
-// Backend → CognitiveServicesOpenAIUser on Foundry (Responses API + agent_reference)
+// Backend → CognitiveServicesOpenAIUser on Foundry (per-agent dedicated endpoints)
+// Backend + Frontend → AcrPull on ACR (image pull via system-assigned MI)
 // Foundry project identity → AcrPull on ACR (agent image pull for hosted agents)
-// Deployer → Azure AI User is assigned via `az role assignment create` in postprovision hook (idempotent)
+// Deployer → Azure AI User + Azure AI Project Manager are assigned via `az role assignment create` in postprovision hook (idempotent).
+// Project Manager is required by the refreshed Hosted Agents preview to call create_version() on HostedAgentDefinition / PromptAgentDefinition.
 
 module roleAssignments './modules/role-assignments.bicep' = {
   name: 'role-assignments'
@@ -165,8 +159,10 @@ module roleAssignments './modules/role-assignments.bicep' = {
   params: {
     foundryAccountName: aiFoundry.outputs.accountName
     backendPrincipalId: backend.outputs.principalId
+    frontendPrincipalId: frontend.outputs.principalId
     containerRegistryName: containerRegistry.outputs.name
     foundryProjectPrincipalId: aiFoundry.outputs.projectPrincipalId
+    foundryAccountPrincipalId: aiFoundry.outputs.accountPrincipalId
   }
 }
 // ── Frontend Container App ──────────────────────────────────────────────────
@@ -179,7 +175,6 @@ module frontend './modules/container-app.bicep' = {
     location: location
     tags: union(tags, { 'azd-service-name': 'frontend' })
     containerAppsEnvironmentId: containerAppsEnv.outputs.environmentId
-    containerRegistryName: containerRegistry.outputs.name
     containerRegistryLoginServer: containerRegistry.outputs.loginServer
     imageName: 'frontend'
     targetPort: 80
@@ -202,6 +197,10 @@ output AI_FOUNDRY_PROJECT_NAME string = aiFoundry.outputs.projectName
 output AI_FOUNDRY_ENDPOINT string = aiFoundry.outputs.endpoint
 output AI_FOUNDRY_PROJECT_ENDPOINT string = aiFoundry.outputs.projectEndpoint
 output AI_FOUNDRY_PORTAL_URL string = aiFoundry.outputs.portalUrl
+// Required by `azd ai agent` extension (azd deploy of host: azure.ai.agent
+// services) so it can target the Foundry project that owns the agents.
+output AZURE_AI_PROJECT_ID string = aiFoundry.outputs.projectId
+output AZURE_AI_PROJECT_ENDPOINT string = aiFoundry.outputs.projectEndpoint
 output BACKEND_CONTAINER_APP_NAME string = backend.outputs.name
 output FRONTEND_CONTAINER_APP_NAME string = frontend.outputs.name
 output AZURE_OPENAI_DEPLOYMENT_NAME string = azureOpenAIDeploymentName

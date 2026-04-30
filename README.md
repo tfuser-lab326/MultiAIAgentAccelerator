@@ -10,7 +10,7 @@ The solution supports **two runtime modes**:
 
 | Mode | How to start | What happens |
 |------|-------------|--------------|
-| **Foundry Hosted Agent** (recommended) | `azd up` | Agents are registered with Microsoft Foundry Hosted Agents; Foundry manages container lifecycle. Backend dispatches through the Foundry project endpoint using `agent_reference` routing and `DefaultAzureCredential`. |
+| **Foundry Hosted Agent** (recommended) | `azd up` | Agents are registered with Microsoft Foundry Hosted Agents (refreshed preview); each agent gets a dedicated endpoint that the backend invokes through `AIProjectClient.get_openai_client(agent_name=...)` with `DefaultAzureCredential`. Foundry manages the container lifecycle. |
 | **Local / Docker Compose** | `docker compose up` | All 4 agent containers + backend + frontend run locally — no Azure deployment needed. |
 
 Decision policy and evaluation methodology adapted from the [Anthropic prior-auth-review-skill](https://github.com/anthropics/healthcare/tree/main/prior-auth-review-skill): LENIENT mode decision policy, per-criterion MET/NOT_MET/INSUFFICIENT evaluation, confidence scoring, progressive gate evaluation, structured audit trails, NCCI bundling risk flagging, service-type classification, and provider specialty-procedure appropriateness as an auditable criterion.
@@ -69,12 +69,12 @@ docker compose up
 
 ### Architecture
 
-This solution uses a **stateless dispatcher** pattern: the FastAPI backend has no local AI runtime — all specialist reasoning runs in four independent Foundry Hosted Agent containers. The orchestrator dispatches through the Foundry project endpoint using `agent_reference` routing and `DefaultAzureCredential`. See [Architecture](./docs/architecture.md) for the full design.
+This solution uses a **stateless dispatcher** pattern: the FastAPI backend has no local AI runtime — all specialist reasoning runs in four independent Foundry Hosted Agent containers. The orchestrator dispatches to each agent's dedicated Foundry endpoint via `AIProjectClient(allow_preview=True).get_openai_client(agent_name=...)` with `DefaultAzureCredential`. See [Architecture](./docs/architecture.md) for the full design.
 
 ### Security
 
 - **Keyless by design** — all Azure resource access uses `DefaultAzureCredential`; no API keys or connection strings are stored anywhere
-- **Managed Identity** — each Container App has a system-assigned managed identity with least-privilege Bicep-assigned role assignments (`CognitiveServicesOpenAIUser`, `Azure AI User`)
+- **Managed Identity** — each Container App has a system-assigned managed identity with least-privilege Bicep-assigned role assignments (`CognitiveServicesOpenAIUser`, `Azure AI User`); the deployer additionally receives `Azure AI Project Manager` (project scope) so the `azd ai agent` extension can call `create_version()` on Hosted Agent definitions, and a `postdeploy` hook grants `Azure AI User` to each agent's per-instance Application identity provisioned by the extension
 - **Local auth disabled** — the Azure AI Foundry account has `disableLocalAuth: true`, enforcing Entra ID-only access
 - See [Security guidelines](#security-guidelines) below for additional hardening recommendations for production deployments handling PHI
 
@@ -147,12 +147,12 @@ The orchestrator coordinates four phases with four specialized agents:
   <summary><b>Foundry Hosted Agent architecture</b></summary>
 
   - Each of the 4 specialist agents has its own `main.py`, `schemas.py`, `Dockerfile`, `agent.yaml`, and `skills/` directory under `agents/<name>/`
-  - Agents use the native MAF `from_agent_framework` pattern with `default_options={"response_format": PydanticModel}` for token-level structured output — no JSON fence parsing
+  - Agents use the refreshed Foundry Hosted Agents preview stack (`agent-framework-core` + `agent-framework-foundry` + `agent-framework-foundry-hosting`): `Agent` is wrapped by `ResponsesHostServer(agent).run()` and `default_options={"response_format": PydanticModel, "store": False}` enforces token-level structured output — no JSON fence parsing
   - The FastAPI backend is a **pure HTTP dispatcher** — it has no local AI runtime; all specialist reasoning runs in the four independent agent containers
   - Each agent container exposes `POST /responses` (Foundry Responses API protocol) and is independently versioned, deployable, and scalable
-  - `hosted_agents.py` is a **two-mode dispatcher**: direct HTTP to agent containers (Docker Compose), or `agent_reference` routing through `{AZURE_AI_PROJECT_ENDPOINT}/responses` with `DefaultAzureCredential` (Foundry Hosted Agents)
-  - Agents are registered with Foundry via `scripts/register_agents.py` (postprovision hook in `azure.yaml`) — Foundry manages the ACA container lifecycle; no self-managed ACA modules in Bicep
-  - `scripts/check_agents.py` runs automatically after registration to verify all agents, App Insights, MCP connections, backend, and frontend are healthy before the deployment completes
+  - `hosted_agents.py` is a **two-mode dispatcher**: direct HTTP to agent containers (Docker Compose), or per-agent dedicated Foundry endpoints via `AIProjectClient(allow_preview=True).get_openai_client(agent_name=...)` with `DefaultAzureCredential` (Foundry Hosted Agents)
+  - Agents are built and registered with Foundry by `azd deploy` itself — each agent has a `host: azure.ai.agent` entry in `azure.yaml` that the `azd ai agent` extension uses to ACR-build the image, push it, call `create_version()`, and provision the per-agent runtime + blueprint identities. A `postdeploy` hook (`scripts/grant_agent_rbac.py`) then grants `Azure AI User` to each runtime identity so the agents can call the Responses API. Foundry manages the ACA container lifecycle; no self-managed ACA modules in Bicep
+  - `scripts/check_agents.py` runs automatically after registration to verify all agents, App Insights, backend, and frontend are healthy before the deployment completes
 </details>
 
 <details>
@@ -174,8 +174,7 @@ The orchestrator coordinates four phases with four specialized agents:
   - Each agent container calls MCP servers directly via `MCPStreamableHTTPTool` (configured via `MCP_*` env vars)
   - DeepSense servers use Key-based auth with `User-Agent: claude-code/1.0` header (handled by a shared `httpx.AsyncClient` in each agent container); PubMed uses unauthenticated access
   - PubMed uses `_ReconnectingMCPTool` to auto-reconnect on idle session expiry (~10 min TTL)
-  - All agents use `AzureOpenAIResponsesClient` with gpt-5.4 on Microsoft Foundry
-  - MCP tools visible in Foundry portal under **Build → Tools**
+  - All agents use `FoundryChatClient` with gpt-5.4 on Microsoft Foundry (refreshed preview)
 </details>
 
 <details>
@@ -261,7 +260,15 @@ Follow the quick deploy steps on the deployment guide to deploy this solution to
 To deploy this solution accelerator, ensure you have access to an [Azure subscription](https://azure.microsoft.com/free/) with the necessary permissions to create resource groups and resources. The **Microsoft Foundry Resource and Project** are automatically provisioned by `azd up`. The solution uses the **Azure OpenAI gpt-5.4** model, which is automatically deployed as part of `azd up` — see [Azure OpenAI model availability](https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models) for details.
 
 > [!WARNING]
-> **Region and deployment type:** gpt-5.4 is available in **East US 2** (`eastus2`) and **Sweden Central** (`swedencentral`).
+> **Validate region availability before deploying.** This solution depends on **two preview features** that are NOT available in every Azure region. Deploying to an unsupported region will fail during `azd up`.
+>
+> **1. Foundry Hosted Agents (preview)** — required to run the 4 agents (`clinical-reviewer`, `compliance`, `coverage-assessment`, `synthesis`). Check the official supported region list before picking a location:
+> - 📍 [Hosted Agents — Region availability](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents#region-availability)
+>
+> **2. Azure OpenAI `gpt-5.4` model** — required for agent reasoning. Currently available in **East US 2** (`eastus2`) and **Sweden Central** (`swedencentral`):
+> - 📍 [Azure OpenAI model availability](https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models)
+>
+> **Recommended regions** (both features confirmed available): **East US 2** or **Sweden Central**.
 >
 > | Deployment Type | Data Residency | Regions |
 > |----------------|---------------|--------|
@@ -271,7 +278,7 @@ To deploy this solution accelerator, ensure you have access to an [Azure subscri
 > - **Sweden Central** automatically uses **GlobalStandard** (the only supported type for that region) — no prompt is shown.
 > - **East US 2** prompts you to choose between **GlobalStandard** and **DataZoneStandard** during `azd up`.
 >
-> If you need data residency, select East US 2 and choose DataZoneStandard. See [Azure OpenAI model availability](https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models) for the latest availability.
+> If you need data residency, select East US 2 and choose DataZoneStandard.
 
 Pricing varies per region and usage, so it isn't possible to predict exact costs for your usage. The majority of the Azure resources used in this infrastructure are on usage-based pricing tiers. Use the [Azure pricing calculator](https://azure.microsoft.com/en-us/pricing/calculator) to estimate costs for your subscription.
 
@@ -349,7 +356,6 @@ By using the *Prior Authorization Review — Multi-Agent Solution Accelerator*, 
 | [Deployment Guide](./docs/DeploymentGuide.md) | Step-by-step deployment instructions — Docker Compose, local development, Azure Container Apps, prerequisites, environment configuration, troubleshooting |
 | [Architecture](./docs/architecture.md) | Detailed hosted-agent-ready architecture, runtime modes, MCP integration, agent details, decision rubric, confidence scoring, and audit justification |
 | [API Reference](./docs/api-reference.md) | Full REST API documentation — review, decision, per-agent endpoints, request/response schemas, SSE events, error codes |
-| [Foundry Hosted Agents Plan](./docs/foundry-hosted-agents-plan.md) | Saved migration plan for the lower-risk Foundry hosted-agent architecture (frontend ACA + backend/orchestrator ACA + 4 hosted agents) |
 | [Extending the Application](./docs/extending.md) | Step-by-step guides for adding new agents, MCP servers, changing the decision rubric, customizing notification letters |
 | [Technical Notes](./docs/technical-notes.md) | Windows SDK patches, MCP header injection, hosted-agent dispatch, structured output, observability, and known limitations |
 | [Troubleshooting](./docs/troubleshooting.md) | Common issues and fixes — CLI failures, hosted-agent config/auth problems, connection errors, truncated responses, and Foundry trace issues |
@@ -380,7 +386,7 @@ This solution accelerator handles **Protected Health Information (PHI)** and cli
 
 | Environment | Credential used | How it's granted |
 |---|---|---|
-| Azure (production) | System-assigned [Managed Identity](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview) on each Container App; deployer user identity | Bicep role assignments at deploy time (`CognitiveServicesOpenAIUser` for backend, `CognitiveServicesOpenAIContributor` + `Azure AI User` for Foundry project MI, `Azure AI User` for deployer) |
+| Azure (production) | System-assigned [Managed Identity](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview) on each Container App; deployer user identity | Bicep role assignments at deploy time (`CognitiveServicesOpenAIUser` for backend, `CognitiveServicesOpenAIContributor` + `Azure AI User` for Foundry project MI, `Azure AI User` + `Azure AI Project Manager` for deployer) |
 | Local / Codespaces | Azure Developer CLI token (`azd auth login`) or Azure CLI token (`az login`) | Developer's own authenticated session |
 
 Because there are no API keys, there is nothing to rotate, leak, or accidentally commit. To ensure continued best practices in your own repository, we recommend enabling [GitHub secret scanning](https://docs.github.com/code-security/secret-scanning/about-secret-scanning) to catch any credentials that might be inadvertently introduced.

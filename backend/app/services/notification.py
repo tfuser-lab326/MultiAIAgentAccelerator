@@ -328,9 +328,8 @@ _WARN_TEXT = (133, 100, 4)     # Warning banner text
 class _LetterPDF(FPDF):
     """Custom FPDF subclass for professional PA notification letters."""
 
-    def __init__(self, letter_type: str, auth_number: str) -> None:
+    def __init__(self, auth_number: str) -> None:
         super().__init__()
-        self._letter_type = letter_type
         self._auth_number = auth_number
 
     def header(self) -> None:
@@ -395,7 +394,7 @@ def generate_letter_pdf(letter_dict: dict) -> str:
 
     is_approval = letter_type == "approval"
 
-    pdf = _LetterPDF(letter_type=letter_type, auth_number=auth_number)
+    pdf = _LetterPDF(auth_number=auth_number)
     pdf.alias_nb_pages()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=22)
@@ -846,16 +845,6 @@ def _table_data_row(
     for text, width in cells:
         pdf.cell(width, 6.5, _safe(text)[:80], border=0, fill=True)
     pdf.ln()
-
-
-def _bullet_item(pdf: FPDF, text: str) -> None:
-    """Render a simple bullet point."""
-    pdf.set_x(12)
-    pdf.set_font("Helvetica", "", 8.5)
-    pdf.set_text_color(*_TEXT)
-    pdf.cell(4, 5, "-")
-    pdf.multi_cell(0, 5, _safe(text),
-                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
 
 def _callout_box(

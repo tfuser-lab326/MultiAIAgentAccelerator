@@ -1,25 +1,29 @@
+"""Sample: invoke a Foundry Hosted Agent via the refreshed-preview Responses API.
+
+The agent enforces a structured JSON `response_format` server-side, so
+`response.output_text` is a JSON string you can parse directly — no
+thread/message/run lifecycle is needed in the refreshed preview.
+"""
+
+import json
+
 from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
 
-project_client = AIProjectClient.from_connection_string(
+project = AIProjectClient(
+    endpoint="<%= endpoint %>",
     credential=DefaultAzureCredential(),
-    conn_str="<%= connectionString %>")
-
-agent = project_client.agents.get_agent("<%= agentId %>")
-
-thread = project_client.agents.create_thread()
-print(f"Created thread, ID: {thread.id}")
-
-message = project_client.agents.create_message(
-    thread_id=thread.id,
-    role="user",
-    content="<%= userMessage %>"
+    allow_preview=True,
 )
 
-run = project_client.agents.create_and_process_run(
-    thread_id=thread.id,
-    agent_id=agent.id)
-messages = project_client.agents.list_messages(thread_id=thread.id)
+openai_client = project.get_openai_client(agent_name="<%= agentId %>")
 
-for text_message in messages.text_messages:
-    print(text_message.as_dict())
+response = openai_client.responses.create(
+    input=[{"type": "message", "role": "user", "content": "<%= userMessage %>"}],
+)
+
+print(f"status={response.status}")
+try:
+    print(json.dumps(json.loads(response.output_text), indent=2))
+except (json.JSONDecodeError, TypeError):
+    print(response.output_text)

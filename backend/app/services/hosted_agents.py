@@ -7,11 +7,16 @@ Direct HTTP mode (Docker Compose / local dev):
   Calls POST {url}/responses using the Foundry Responses API envelope.
   Used by docker-compose where each agent runs as a local container.
 
-Foundry Hosted Agents mode (Azure deployment via azd up):
+Foundry Hosted Agents mode — refreshed preview (Azure deployment via azd up):
   Triggered when HOSTED_AGENT_*_URL is empty and AZURE_AI_PROJECT_ENDPOINT is set.
-  Uses AIProjectClient.get_openai_client() → responses.create() with agent_reference.
+  Uses AIProjectClient(allow_preview=True).get_openai_client(agent_name=...) which
+  returns a client pre-bound to the agent's dedicated endpoint. No extra_body and
+  no agent_reference are needed — each agent has its own URL of the form
+  {project_endpoint}/agents/{name}/endpoint/protocols/openai/v1/responses.
   Auth uses DefaultAzureCredential — resolves to the backend ACA managed identity.
-  Foundry Agent Service routes the request to the named hosted agent deployment.
+
+  Migration ref:
+  https://learn.microsoft.com/azure/foundry/agents/how-to/migrate-hosted-agent-preview#agent-invocation-changes
 """
 
 import asyncio
@@ -25,32 +30,43 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── Foundry OpenAI client (lazy-initialised, shared across requests) ──────────
-_openai_client: Any = None
+# ── Per-agent OpenAI clients (lazy-initialised, cached by agent name) ────────
+# In the refreshed preview each Foundry agent has a dedicated endpoint and the
+# SDK binds a client per-agent. We cache one client per foundry_agent_name.
+_openai_clients: dict[str, Any] = {}
+_project_client: Any = None
 
 
-def _get_openai_client() -> Any:
-    """Get or create a cached OpenAI client from the AIProjectClient SDK."""
-    global _openai_client
-    if _openai_client is not None:
-        return _openai_client
+def _get_openai_client(foundry_agent_name: str) -> Any:
+    """Get or create a cached OpenAI client bound to a specific Foundry agent."""
+    cached = _openai_clients.get(foundry_agent_name)
+    if cached is not None:
+        return cached
 
     try:
         from azure.ai.projects import AIProjectClient
         from azure.identity import DefaultAzureCredential
     except ImportError:
         raise RuntimeError(
-            "azure-ai-projects and azure-identity are required for Foundry Hosted Agents mode. "
-            "Install with: pip install azure-ai-projects azure-identity"
+            "azure-ai-projects>=2.1.0 and azure-identity are required for Foundry "
+            "Hosted Agents mode. Install with: pip install 'azure-ai-projects>=2.1.0' "
+            "azure-identity"
         )
 
-    project_endpoint = settings.AZURE_AI_PROJECT_ENDPOINT.rstrip("/")
-    client = AIProjectClient(
-        endpoint=project_endpoint,
-        credential=DefaultAzureCredential(),
-    )
-    _openai_client = client.get_openai_client()
-    return _openai_client
+    global _project_client
+    if _project_client is None:
+        project_endpoint = settings.AZURE_AI_PROJECT_ENDPOINT.rstrip("/")
+        # allow_preview=True is required for the agent_name parameter on
+        # get_openai_client() (refreshed preview surface).
+        _project_client = AIProjectClient(
+            endpoint=project_endpoint,
+            credential=DefaultAzureCredential(),
+            allow_preview=True,
+        )
+
+    client = _project_client.get_openai_client(agent_name=foundry_agent_name)
+    _openai_clients[foundry_agent_name] = client
+    return client
 
 
 def _build_direct_headers() -> dict[str, str]:
@@ -128,7 +144,7 @@ def _extract_result(data: Any) -> dict:
 async def _invoke_direct_http(agent_name: str, url: str, payload: dict) -> dict:
     """Invoke agent via direct HTTP — Docker Compose / local dev mode.
 
-    Uses the Foundry Responses API envelope expected by from_agent_framework().
+    Uses the Foundry Responses API envelope expected by ResponsesHostServer.
     Input must be a flat array of message objects, not wrapped in a {messages: []} dict.
     """
     request_body = {
@@ -167,14 +183,16 @@ async def _invoke_direct_http(agent_name: str, url: str, payload: dict) -> dict:
 async def _invoke_foundry_agent(
     agent_name: str, foundry_agent_name: str, payload: dict
 ) -> dict:
-    """Invoke a Foundry Hosted Agent via the OpenAI SDK responses.create().
+    """Invoke a Foundry Hosted Agent via the refreshed-preview Responses API.
 
-    Uses AIProjectClient.get_openai_client() with agent_reference routing
-    via extra_body. Authentication uses DefaultAzureCredential which resolves
-    to the backend ACA managed identity on Azure (no secrets required).
+    Uses AIProjectClient(allow_preview=True).get_openai_client(agent_name=...)
+    which returns a client pre-bound to the agent's dedicated endpoint, so we
+    pass `input` directly with no `extra_body` or `agent_reference` wrapper.
+    Authentication uses DefaultAzureCredential which resolves to the backend
+    ACA managed identity on Azure (no secrets required).
     """
     try:
-        openai_client = _get_openai_client()
+        openai_client = _get_openai_client(foundry_agent_name)
     except Exception as exc:
         return {
             "error": f"Failed to initialise Foundry client for {agent_name}: {exc}",
@@ -182,20 +200,12 @@ async def _invoke_foundry_agent(
         }
 
     try:
-        # Send input as a structured message array via extra_body to match
-        # the format that from_agent_framework() expects (same as ACA direct HTTP mode).
-        # The SDK input param is set to a placeholder string (required by the SDK),
-        # while extra_body.input overrides it with the proper Responses API envelope.
+        # Send the prior-auth payload as a single user message. The agent's
+        # default_options enforces a Pydantic response_format, so the assistant
+        # turn returns a JSON-serialised model that we parse below.
         response = await asyncio.to_thread(
             openai_client.responses.create,
-            input="Process the prior authorization request in the input messages.",
-            extra_body={
-                "agent_reference": {
-                    "name": foundry_agent_name,
-                    "type": "agent_reference",
-                },
-                "input": [{"type": "message", "role": "user", "content": json.dumps(payload)}],
-            },
+            input=[{"type": "message", "role": "user", "content": json.dumps(payload)}],
         )
 
         # Use output_text for reliable text extraction, then parse as JSON
@@ -246,7 +256,8 @@ async def invoke_hosted_agent(
         url:                Direct HTTP URL set by docker-compose. Empty string for
                             Foundry Hosted Agents mode.
         payload:            Request data dict forwarded to the agent.
-        foundry_agent_name: Foundry Hosted Agent name from agent.yaml
+        foundry_agent_name: Foundry Hosted Agent name (matches `name:` in agents/<dir>/agent.yaml,
+            registered by `azd deploy` via the `services:` block in azure.yaml)
                             (e.g. "clinical-reviewer-agent"). Required when url
                             is empty and Foundry mode is active.
 

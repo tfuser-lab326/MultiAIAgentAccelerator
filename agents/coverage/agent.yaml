@@ -1,38 +1,37 @@
-# Foundry Hosted Agent descriptor — Coverage Assessment Agent
-# Deploy with: az ai agent deploy --file agent.yaml
+# Foundry Hosted Agent descriptor — Coverage Assessment Agent.
 #
-# MCP connections: self-managed via MCPStreamableHTTPTool in main.py
-# No Foundry Tool MCP registration required for DeepSense servers.
-
+# Consumed by the `azd ai agent` extension at deploy time. Companion entry
+# in repo-root azure.yaml `services:` provides build context + remoteBuild.
+#
+# Schema reference (canonical):
+#   https://github.com/Azure-Samples/foundry-hosted-agentframework-demos/blob/main/agents/agent.yaml
+#
+# MCP tools (NPI registry, CMS Coverage) are wired IN-CONTAINER via
+# `MCPStreamableHTTPTool` in main.py — Hosted Agents v2 does not accept the
+# legacy MCPTool entries.
+kind: hosted
 name: coverage-assessment-agent
-description: >
-  Verifies provider NPI credentials, searches Medicare NCDs/LCDs via CMS
-  Coverage MCP, maps clinical findings to policy criteria with
-  MET/NOT_MET/INSUFFICIENT assessment, and produces documentation gap analysis.
-runtime: agent-framework
-version: "1.0.0"
-
+protocols:
+  - protocol: responses
+    version: "1.0.0"
 resources:
   cpu: "1"
-  memory: "2Gi"
-
-env:
-  # Microsoft Foundry project endpoint (injected by Foundry at deploy time)
-  - name: AZURE_AI_PROJECT_ENDPOINT
-    secretRef: azure-ai-project-endpoint
-
-  # Model deployment to use (gpt-5.4 recommended for coverage criteria assessment)
+  memory: 2Gi
+environment_variables:
+  - name: MODEL_DEPLOYMENT_NAME
+    value: ${AZURE_OPENAI_DEPLOYMENT_NAME}
   - name: AZURE_OPENAI_DEPLOYMENT_NAME
-    value: gpt-5.4
-
-  # DeepSense NPI Registry MCP server
+    value: ${AZURE_OPENAI_DEPLOYMENT_NAME}
+  - name: AZURE_AI_PROJECT_ENDPOINT
+    value: ${AI_FOUNDRY_PROJECT_ENDPOINT}
+  # App Insights connection string — the platform's auto-injection of the
+  # reserved APPLICATIONINSIGHTS_CONNECTION_STRING is malformed in the
+  # current preview, which crashes the agent host's tracing init at startup.
+  # main.py reads this fallback name and overrides the broken value.
+  - name: OTEL_CONNECTION_STRING
+    value: ${APPLICATION_INSIGHTS_CONNECTION_STRING}
   - name: MCP_NPI_REGISTRY
     value: https://mcp.deepsense.ai/npi_registry/mcp
-
-  # DeepSense CMS Coverage MCP server
   - name: MCP_CMS_COVERAGE
     value: https://mcp.deepsense.ai/cms_coverage/mcp
-
-  # Azure Application Insights (optional)
-  - name: APPLICATION_INSIGHTS_CONNECTION_STRING
-    secretRef: app-insights-connection-string
+tools: []

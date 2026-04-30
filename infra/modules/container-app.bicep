@@ -3,7 +3,6 @@ param name string
 param location string
 param tags object = {}
 param containerAppsEnvironmentId string
-param containerRegistryName string
 param containerRegistryLoginServer string
 param imageName string
 param targetPort int
@@ -26,11 +25,6 @@ param minReplicas int = 0
 @description('Maximum number of replicas')
 param maxReplicas int = 3
 
-// Get registry credentials
-resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' existing = {
-  name: containerRegistryName
-}
-
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: name
   location: location
@@ -48,22 +42,22 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         transport: 'auto'
         allowInsecure: false
       }
-      registries: [
+      // Pull images from ACR using the Container App's system-assigned
+      // managed identity. Requires AcrPull role on the registry (granted in
+      // infra/modules/role-assignments.bicep). No admin password needed.
+      // Only declared when actually pulling from ACR — on a clean first
+      // deploy the image is the public MCR placeholder and the system MI
+      // hasn't been granted AcrPull yet (the role assignment depends on
+      // this Container App's principalId), so unconditionally registering
+      // ACR here would cause the revision to fail authentication and the
+      // provisioning operation to time out after 20 min.
+      registries: useAcrImage ? [
         {
           server: containerRegistryLoginServer
-          username: containerRegistry.listCredentials().username
-          passwordSecretRef: 'registry-password'
+          identity: 'system'
         }
-      ]
-      secrets: union(
-        [
-          {
-            name: 'registry-password'
-            value: containerRegistry.listCredentials().passwords[0].value
-          }
-        ],
-        secrets
-      )
+      ] : []
+      secrets: secrets
     }
     template: {
       containers: [

@@ -13,13 +13,14 @@ Enhanced with the Anthropic prior-auth-review-skill decision rubric:
   - Audit justification document generation
 
 All four specialist agents (compliance, clinical, coverage, synthesis) run
-as independent hosted agent containers. This module is the pure dispatcher.
+as independent Foundry Hosted Agent containers (or local docker-compose
+containers in dev mode). This module is the pure async dispatcher and
+invokes them via HTTP through ``app.services.hosted_agents``.
 """
 
 import asyncio
 import json
 import logging
-import os
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from app.agents.compliance_agent import run_compliance_review
@@ -944,10 +945,6 @@ async def _run_review_pipeline(
 async def _safe_run(agent_name: str, fn, *args) -> dict:
     """Run an agent function with error handling and automatic retry.
 
-    On Windows, if the running event loop is a SelectorEventLoop (which
-    uvicorn --reload may create), subprocess execution will fail. In that
-    case, run the agent in a separate thread with its own ProactorEventLoop.
-
     After each attempt, the result is validated against ``_EXPECTED_KEYS``.
     If required keys are missing (e.g. from a truncated API response), the
     agent is retried up to ``_MAX_AGENT_RETRIES`` times.
@@ -958,23 +955,7 @@ async def _safe_run(agent_name: str, fn, *args) -> dict:
 
     for attempt in range(_MAX_AGENT_RETRIES + 1):
         try:
-            loop = asyncio.get_running_loop()
-            loop_type = type(loop).__name__
-            policy_type = type(asyncio.get_event_loop_policy()).__name__
-            logger.info(
-                "[debug] %s (attempt %d/%d) — event loop: %s, policy: %s",
-                agent_name, attempt + 1, _MAX_AGENT_RETRIES + 1,
-                loop_type, policy_type,
-            )
-
-            # If running on a SelectorEventLoop, subprocess_exec won't work.
-            # Run the agent in a separate thread with a ProactorEventLoop.
-            if isinstance(loop, asyncio.SelectorEventLoop) and os.name == "nt":
-                logger.info("[debug] %s — SelectorEventLoop detected, using thread-based ProactorEventLoop", agent_name)
-                last_result = await _run_in_proactor_thread(agent_name, fn, *args)
-            else:
-                last_result = await fn(*args)
-
+            last_result = await fn(*args)
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -1007,33 +988,6 @@ async def _safe_run(agent_name: str, fn, *args) -> dict:
             )
 
     return last_result
-
-
-async def _run_in_proactor_thread(agent_name: str, fn, *args) -> dict:
-    """Run an async agent function in a separate thread with ProactorEventLoop.
-
-    This is the workaround for Windows uvicorn --reload creating a
-    SelectorEventLoop which doesn't support subprocess creation.
-    """
-    import concurrent.futures
-
-    def _thread_target():
-        """Create a ProactorEventLoop in this thread and run the agent."""
-        proactor_loop = asyncio.ProactorEventLoop()
-        asyncio.set_event_loop(proactor_loop)
-        try:
-            return proactor_loop.run_until_complete(fn(*args))
-        finally:
-            proactor_loop.close()
-
-    # Run in a thread pool to avoid blocking the main event loop
-    loop = asyncio.get_running_loop()
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix=f"agent-{agent_name}"
-    ) as executor:
-        result = await loop.run_in_executor(executor, _thread_target)
-
-    return result
 
 
 async def _run_synthesis(

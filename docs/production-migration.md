@@ -361,13 +361,14 @@ to point at the APIM MCP Gateway URLs:
 
 #### 5. Simplify Agent Python Code
 
-Once APIM handles the `User-Agent` header injection, remove the custom
-`httpx.AsyncClient` from each agent's `main.py`:
+Once APIM handles the `User-Agent` header injection, you can drop the
+`headers=` argument and the custom `httpx.AsyncClient` from each
+`MCPStreamableHTTPTool` instance in the agents' `main.py`:
 
 ```python
 # BEFORE (current — custom HTTP client in every agent):
 _MCP_HTTP_CLIENT = httpx.AsyncClient(
-    headers={"User-Agent": "claude-code/1.0"},
+    headers={"User-Agent": "prior-auth-clinical/1.0"},
     timeout=httpx.Timeout(60.0),
 )
 icd10_tool = MCPStreamableHTTPTool(
@@ -395,8 +396,11 @@ icd10_tool = MCPStreamableHTTPTool(
 | `MCP_NPI_REGISTRY` | `https://mcp.deepsense.ai/npi_registry/mcp` | `https://<apim>.azure-api.net/npi-mcp/mcp` |
 | `MCP_CMS_COVERAGE` | `https://mcp.deepsense.ai/cms_coverage/mcp` | `https://<apim>.azure-api.net/cms-mcp/mcp` |
 
-The agent code (`MCPStreamableHTTPTool` instantiation in each `main.py`)
-does not change at all — it reads the URL from the environment variable.
+> All five MCP servers are wired in-container via `MCPStreamableHTTPTool`
+> (URLs read from the `MCP_*` env vars above), so switching to APIM only
+> requires updating the env var values in each `agents/<name>/agent.yaml`
+> and `docker-compose.yml`. No code changes are needed beyond the optional
+> simplification shown in step 5.
 
 ### Diagnostic Logging Caveat
 

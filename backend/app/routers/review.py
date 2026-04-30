@@ -18,7 +18,6 @@ from app.models.schemas import (
     ClinicalResult,
     CoverageResult,
     DocumentationGap,
-    AgentCheck,
 )
 from app.agents.orchestrator import (
     run_multi_agent_review,
@@ -44,9 +43,9 @@ def _build_review_response(request_id: str, result: dict) -> ReviewResponse:
         })
 
     # Parse per-agent results.
-    # output_format provides schema guidance to agents but doesn't
-    # mechanically enforce field names. Lightweight adapters handle
-    # common output variations before Pydantic parsing.
+    # Hosted agents emit structured output enforced by Foundry's response_format,
+    # so most fields land in the right shape. Lightweight adapters below handle
+    # known nested-object variations before Pydantic parsing.
     agent_raw = result.get("agent_results", {})
 
     compliance_raw = agent_raw.get("compliance")
@@ -270,11 +269,12 @@ def _get_any_field(d: dict, *keys, default=None):
 # ---------------------------------------------------------------------------
 # Lightweight output adapters
 # ---------------------------------------------------------------------------
-# The Claude Code SDK's output_format provides schema guidance but does NOT
-# mechanically enforce field names like the direct Claude API does. Agents
-# may use wrapper objects or variant field names. These adapters extract the
-# correct data into the Pydantic-expected fields. They are intentionally
-# concise compared to the old 1000+ line sanitizer.
+# Hosted agents emit structured output via Foundry's response_format (a
+# Pydantic JSON schema). The platform enforces the top-level shape, but
+# nested objects can still vary slightly between models or revisions.
+# These small adapters map common variant field names back to the schema
+# expected by the Pydantic models below. They are intentionally concise
+# (no broad sanitisation) — each branch handles a specific known variant.
 # ---------------------------------------------------------------------------
 
 
@@ -1063,9 +1063,9 @@ def _generate_coverage_checks(raw: dict) -> list[dict]:
 def _safe_parse(model_class, data):
     """Attempt to parse a dict into a Pydantic model, return None on failure.
 
-    With structured output (output_format), agent data already matches the
-    Pydantic schema. This function simply validates and returns the model,
-    with field-by-field and minimal fallbacks for robustness.
+    With Foundry-enforced structured output, agent data should already match
+    the Pydantic schema. This function validates and returns the model, with
+    field-by-field and minimal fallbacks for robustness against schema drift.
     """
     if not data or not isinstance(data, dict):
         return None

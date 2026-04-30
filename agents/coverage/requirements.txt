@@ -1,14 +1,29 @@
-# Microsoft Agent Framework — core runtime
-agent-framework-core>=1.0.0rc2,<=1.0.0rc3
-# Foundry Hosted Agent server adapter — core protocol layer + MAF adapter
-# See: https://learn.microsoft.com/azure/foundry/agents/concepts/hosted-agents#public-adapter-packages
-azure-ai-agentserver-core>=1.0.0b16
-azure-ai-agentserver-agentframework>=1.0.0b16
-# azure-ai-projects is pulled transitively by agent-framework-core
+# Microsoft Agent Framework — refreshed Hosted Agents preview (April 2026+)
+# See: https://learn.microsoft.com/azure/foundry/agents/how-to/migrate-hosted-agent-preview
+#
+# Package split (refreshed preview):
+#   agent-framework-core        — Agent / @tool / MCPStreamableHTTPTool / SkillsProvider
+#   agent-framework-foundry     — FoundryChatClient (was: agent_framework.azure.AzureAIAgentClient)
+#   agent-framework-foundry-hosting — ResponsesHostServer (replaces azure-ai-agentserver-agentframework)
+#
+# The old `azure-ai-agentserver-agentframework` adapter has been retired and
+# MUST NOT be reintroduced — it targets the initial preview backend that is
+# being deprecated on 2026-05-22.
+agent-framework-core>=1.2.0
+agent-framework-foundry>=1.2.0
+agent-framework-foundry-hosting>=1.0.0a260424
+# Protocol library — pulled transitively by agent-framework-foundry-hosting,
+# pinned here for reproducibility.
+azure-ai-agentserver-core>=2.0.0b3
 # Managed identity / DefaultAzureCredential
 azure-identity>=1.15.0
-# MCP HTTP client (header injection for DeepSense CloudFront)
+# MCP HTTP client — used by both NPI Registry and CMS Coverage MCP tools
+# (always wired in-container under the refreshed Hosted Agents preview;
+# Foundry-managed MCPTool entries are no longer used).
 httpx>=0.27.0
+# MCP runtime — required by `MCPStreamableHTTPTool` from agent-framework-core.
+# NOT pulled transitively in the current preview, must be pinned explicitly.
+mcp>=1.0.0
 # Environment variable loading
 python-dotenv>=1.0.0
 # Azure Monitor OpenTelemetry (optional — remove if not using App Insights)

@@ -8,23 +8,6 @@ import type {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api";
 
-export async function submitReview(
-  request: PriorAuthRequest
-): Promise<ReviewResponse> {
-  const response = await fetch(`${API_BASE}/review`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || `Review failed (${response.status})`);
-  }
-
-  return response.json();
-}
-
 /**
  * Submit a prior auth review with real-time SSE progress streaming.
  * Returns an AbortController so the caller can cancel the request.

@@ -1,42 +1,44 @@
-# Foundry Hosted Agent descriptor — Clinical Reviewer Agent
-# Deploy with: az ai agent deploy --file agent.yaml
+# Foundry Hosted Agent descriptor — Clinical Reviewer Agent.
 #
-# MCP connections: self-managed via MCPStreamableHTTPTool in main.py
-# No Foundry Tool MCP registration required for DeepSense servers.
-
+# Consumed by the `azd ai agent` extension at deploy time. Companion entry
+# in repo-root azure.yaml `services:` provides build context + remoteBuild.
+#
+# Schema reference (canonical):
+#   https://github.com/Azure-Samples/foundry-hosted-agentframework-demos/blob/main/agents/agent.yaml
+#
+# MCP tools (ICD-10, PubMed, ClinicalTrials.gov) are wired IN-CONTAINER via
+# `MCPStreamableHTTPTool` in main.py — Hosted Agents v2 does not accept the
+# legacy MCPTool entries that the Foundry Agent Service / Assistants API
+# used to expose. We pass each MCP server URL as an env var that main.py
+# reads and converts to an in-process MCP tool.
+kind: hosted
 name: clinical-reviewer-agent
-description: >
-  Validates ICD-10 diagnosis codes, extracts clinical indicators with
-  confidence scoring, searches PubMed literature and ClinicalTrials.gov,
-  and returns a structured clinical profile for downstream coverage assessment.
-runtime: agent-framework
-version: "1.0.0"
-
+protocols:
+  - protocol: responses
+    version: "1.0.0"
 resources:
   cpu: "1"
-  memory: "2Gi"
-
-env:
-  # Microsoft Foundry project endpoint (injected by Foundry at deploy time)
-  - name: AZURE_AI_PROJECT_ENDPOINT
-    secretRef: azure-ai-project-endpoint
-
-  # Model deployment to use (gpt-5.4 recommended for clinical reasoning depth)
+  memory: 2Gi
+environment_variables:
+  # Model deployment (canonical + legacy fallback names).
+  - name: MODEL_DEPLOYMENT_NAME
+    value: ${AZURE_OPENAI_DEPLOYMENT_NAME}
   - name: AZURE_OPENAI_DEPLOYMENT_NAME
-    value: gpt-5.4
-
-  # DeepSense ICD-10 MCP server
+    value: ${AZURE_OPENAI_DEPLOYMENT_NAME}
+  - name: AZURE_AI_PROJECT_ENDPOINT
+    value: ${AI_FOUNDRY_PROJECT_ENDPOINT}
+  # App Insights connection string — the platform's auto-injection of the
+  # reserved APPLICATIONINSIGHTS_CONNECTION_STRING is malformed in the
+  # current preview, which crashes the agent host's tracing init at startup
+  # (`ValueError: Invalid connection string`). main.py reads this fallback
+  # name and overrides the broken value before ResponsesHostServer construction.
+  - name: OTEL_CONNECTION_STRING
+    value: ${APPLICATION_INSIGHTS_CONNECTION_STRING}
+  # MCP endpoints — main.py builds MCPStreamableHTTPTool entries from these.
   - name: MCP_ICD10_CODES
     value: https://mcp.deepsense.ai/icd10_codes/mcp
-
-  # Anthropic PubMed MCP server
   - name: MCP_PUBMED
     value: https://pubmed.mcp.claude.com/mcp
-
-  # DeepSense Clinical Trials MCP server
   - name: MCP_CLINICAL_TRIALS
     value: https://mcp.deepsense.ai/clinical_trials/mcp
-
-  # Azure Application Insights (optional)
-  - name: APPLICATION_INSIGHTS_CONNECTION_STRING
-    secretRef: app-insights-connection-string
+tools: []

@@ -123,22 +123,45 @@ resource capabilityHost 'Microsoft.CognitiveServices/accounts/capabilityHosts@20
     capabilityHostKind: 'Agents'
   }
 }
-
+// ── Project Capability Host ────────────────────────────────
+// The refreshed Hosted Agents preview (April 2026) requires a capability host
+// at the *project* level in addition to the account level. Without it,
+// `client.agents.create_version()` returns a generic `(server_error) 500`
+// because the project has no agent hosting backend bound to it. Discovered
+// empirically; not yet documented at
+// learn.microsoft.com/azure/foundry/agents/how-to/create-agents-resource.
+resource projectCapabilityHost 'Microsoft.CognitiveServices/accounts/projects/capabilityHosts@2025-12-01' = {
+  name: 'projectcaphost'
+  parent: foundryProject
+  properties: {
+    capabilityHostKind: 'Agents'
+  }
+  dependsOn: [capabilityHost]
+}
 // ── Outputs ─────────────────────────────────────────────────────────────────
 
 output accountName string = foundryAccount.name
 output projectName string = foundryProject.name
-output accountId string = foundryAccount.id
 output projectId string = foundryProject.id
 output endpoint string = foundryAccount.properties.endpoint
 output portalUrl string = 'https://ai.azure.com/manage/project?wsid=${foundryProject.id}'
-output deploymentName string = modelDeployment.name
 
 // Project endpoint: used by the backend orchestrator to invoke Foundry Hosted
-// Agents via the Responses API with agent_reference routing.
+// Agents via the Responses API on per-agent dedicated endpoints.
+// MUST use the services.ai.azure.com subdomain (the "AI Foundry API" endpoint)
+// rather than the default cognitiveservices.azure.com one — the Agent Service
+// runtime only routes requests to the AI Foundry API subdomain. Hitting the
+// cognitiveservices subdomain returns 404 "Subdomain does not map to a resource".
 // Format: https://<resource>.services.ai.azure.com/api/projects/<project>
-output projectEndpoint string = '${foundryAccount.properties.endpoint}api/projects/${foundryProject.name}'
+output projectEndpoint string = 'https://${foundryAccount.name}.services.ai.azure.com/api/projects/${foundryProject.name}'
 
 // Project system-assigned managed identity — needs AcrPull on ACR so Foundry
 // Agent Service can pull the 4 agent container images.
 output projectPrincipalId string = foundryProject.identity.principalId
+
+// Foundry account system-assigned managed identity — ALSO needs AcrPull on
+// ACR. The hosted agents service uses the *account* MI (not the project MI)
+// to validate agent images at `create_version()` time. Without it, the call
+// returns a generic `(server_error) 500`. Discovered empirically; required
+// in addition to the project MI grant.
+output accountPrincipalId string = foundryAccount.identity.principalId

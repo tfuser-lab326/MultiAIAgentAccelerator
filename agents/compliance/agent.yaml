@@ -1,32 +1,48 @@
-# Foundry Hosted Agent descriptor — Compliance Validation Agent
-# Deploy with: az ai agent deploy --file agent.yaml
+# Foundry Hosted Agent descriptor — Compliance Validation Agent.
 #
-# No MCP connections — compliance validation is pure reasoning.
-# No Foundry Tool MCP registration required.
-
+# This file is consumed by the `azd ai agent` extension at deploy time to
+# build the HostedAgentDefinition payload sent to the Foundry control plane
+# (cpu/memory + environment_variables + protocols). The companion
+# `services:` entry in the repo-root azure.yaml provides the Docker build
+# context, ACR remote-build flag, and `azd ai agent run` startupCommand.
+#
+# Schema reference (canonical):
+#   https://github.com/Azure-Samples/foundry-hosted-agentframework-demos/blob/main/agents/agent.yaml
+#
+# Notes:
+#   * `image:` is INTENTIONALLY OMITTED — azd builds it from the Dockerfile
+#     in this folder and tags it on the project's ACR connection.
+#   * `${VAR}` placeholders are substituted from `azd env` values at deploy.
+#   * Reserved names that the platform auto-injects must NOT appear here:
+#       FOUNDRY_PROJECT_ENDPOINT, FOUNDRY_AGENT_NAME, FOUNDRY_AGENT_VERSION,
+#       anything with the `AGENT_` prefix.
+#     APPLICATIONINSIGHTS_CONNECTION_STRING is set explicitly below — the
+#     platform's auto-injection produces a malformed value in the current
+#     preview, which crashes `azure.ai.agentserver.core._tracing` at startup
+#     before /readiness can return 200.
+#   * Compliance is pure LLM reasoning — no MCP tool URLs needed.
+kind: hosted
 name: compliance-agent
-description: >
-  Validates documentation completeness for prior authorization requests
-  using a 10-item checklist covering patient information, provider NPI,
-  insurance details, medical codes, clinical notes quality, NCCI bundling
-  risk, and service type classification.
-  Uses no external tools — pure LLM reasoning.
-runtime: agent-framework
-version: "1.0.0"
-
+protocols:
+  - protocol: responses
+    version: "1.0.0"
 resources:
   cpu: "0.5"
-  memory: "1Gi"
-
-env:
-  # Microsoft Foundry project endpoint (injected by Foundry at deploy time)
-  - name: AZURE_AI_PROJECT_ENDPOINT
-    secretRef: azure-ai-project-endpoint
-
-  # Model deployment to use (gpt-5.4 recommended for accurate checklist validation)
+  memory: 1Gi
+environment_variables:
+  # Canonical model deployment name read by main.py (preferred form).
+  - name: MODEL_DEPLOYMENT_NAME
+    value: ${AZURE_OPENAI_DEPLOYMENT_NAME}
+  # Legacy fallback name read by main.py for docker-compose local dev.
   - name: AZURE_OPENAI_DEPLOYMENT_NAME
-    value: gpt-5.4
-
-  # Azure Application Insights (optional)
-  - name: APPLICATION_INSIGHTS_CONNECTION_STRING
-    secretRef: app-insights-connection-string
+    value: ${AZURE_OPENAI_DEPLOYMENT_NAME}
+  # Legacy fallback name (FOUNDRY_PROJECT_ENDPOINT is platform-injected).
+  - name: AZURE_AI_PROJECT_ENDPOINT
+    value: ${AI_FOUNDRY_PROJECT_ENDPOINT}
+  # App Insights connection string — the platform's auto-injection of the
+  # reserved APPLICATIONINSIGHTS_CONNECTION_STRING is malformed in the
+  # current preview, which crashes the agent host's tracing init at startup.
+  # main.py reads this fallback name and overrides the broken value.
+  - name: OTEL_CONNECTION_STRING
+    value: ${APPLICATION_INSIGHTS_CONNECTION_STRING}
+tools: []
