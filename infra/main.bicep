@@ -45,31 +45,12 @@ var tags = {
   'solution-accelerator': 'prior-auth-maf'
 }
 
-// ✅ NEW PARAMETER (ONLY ADDITION)
-@description('Name of the existing Resource Group to deploy resources into')
-param existingResourceGroupName string
+// ── Resource Group ──────────────────────────────────────────────────────────
 
-// ── MCP URLs ────────────────────────────────────────────────────────────────
-param mcpIcd10CodesUrl string = 'https://mcp.deepsense.ai/icd10_codes/mcp'
-param mcpPubmedUrl string = 'https://pubmed.mcp.claude.com/mcp'
-param mcpClinicalTrialsUrl string = 'https://mcp.deepsense.ai/clinical_trials/mcp'
-param mcpNpiRegistryUrl string = 'https://mcp.deepsense.ai/npi_registry/mcp'
-param mcpCmsCoverageUrl string = 'https://mcp.deepsense.ai/cms_coverage/mcp'
-
-// ── Variables ───────────────────────────────────────────────────────────────
-
-var abbrs = loadJsonContent('./abbreviations.json')
-var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
-var tags = {
-  'azd-env-name': environmentName
-  'solution-accelerator': 'prior-auth-maf'
-}
-
-// ❌ REMOVED: Resource Group creation
-
-// ✅ EXISTING RESOURCE GROUP (ONLY CHANGE)
-resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' existing = {
-  name: existingResourceGroupName
+resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
+  name: '${abbrs.resourcesResourceGroups}${environmentName}'
+  location: location
+  tags: tags
 }
 
 // ── Container Registry ──────────────────────────────────────────────────────
